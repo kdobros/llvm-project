@@ -1,7 +1,7 @@
 // RUN: mlir-opt %s -convert-std-to-llvm -verify-diagnostics -split-input-file
 
 func @mlir_cast_to_llvm(%0 : index) -> !llvm.i64 {
-  // expected-error@+1 {{'llvm.mlir.cast' op type must be non-index integer types, float types, or vector of mentioned types}}
+  // expected-error@+1 {{'llvm.mlir.cast' op casted types must be non-index integer types, float types, vector of mentioned types, or memref of mentioned types}}
   %1 = llvm.mlir.cast %0 : index to !llvm.i64
   return %1 : !llvm.i64
 }
@@ -9,7 +9,7 @@ func @mlir_cast_to_llvm(%0 : index) -> !llvm.i64 {
 // -----
 
 func @mlir_cast_from_llvm(%0 : !llvm.i64) -> index {
-  // expected-error@+1 {{'llvm.mlir.cast' op type must be non-index integer types, float types, or vector of mentioned types}}
+  // expected-error@+1 {{'llvm.mlir.cast' op casted types must be non-index integer types, float types, vector of mentioned types, or memref of mentioned types}}
   %1 = llvm.mlir.cast %0 : !llvm.i64 to index
   return %1 : index
 }

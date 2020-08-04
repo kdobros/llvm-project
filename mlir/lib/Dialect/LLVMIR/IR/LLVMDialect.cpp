@@ -988,39 +988,97 @@ static void printGlobalOp(OpAsmPrinter &p, GlobalOp op) {
 //===----------------------------------------------------------------------===//
 
 static LogicalResult verify(DialectCastOp op) {
-  auto verifyMLIRCastType = [&op](Type type) -> LogicalResult {
-    if (auto llvmType = type.dyn_cast<LLVM::LLVMType>()) {
-      if (llvmType.isVectorTy())
-        llvmType = llvmType.getVectorElementType();
-      if (llvmType.isIntegerTy() || llvmType.isBFloatTy() ||
-          llvmType.isHalfTy() || llvmType.isFloatTy() ||
-          llvmType.isDoubleTy()) {
-        return success();
-      }
-      return op.emitOpError("type must be non-index integer types, float "
-                            "types, or vector of mentioned types.");
+  auto inType = op.in().getType();
+  auto outType = op.getType();
+
+  // Casting between same types is valid
+  if (inType == outType)
+    return success();
+
+  auto inLLVMType = inType.dyn_cast<LLVM::LLVMType>();
+  auto outLLVMType = outType.dyn_cast<LLVM::LLVMType>();
+
+  // If types are different then exactly one of them must be LLVM type
+  if (!inLLVMType && !outLLVMType)
+    return op.emitOpError("incorrect cast between two non-LLVM types");
+  if (inLLVMType && outLLVMType)
+    return op.emitOpError("incorrect cast between two different LLVM types");
+
+  auto llvmType = inLLVMType ? inLLVMType : outLLVMType;
+  auto otherType = inLLVMType ? outType : inType;
+
+  auto verifyScalarCastTypes = [](LLVM::LLVMType llvmType,
+                                  Type stdType) -> LogicalResult {
+    if (stdType.isa<FloatType>()) {
+      return success(llvmType.isBFloatTy() || llvmType.isFloatTy() ||
+                     llvmType.isHalfTy() || llvmType.isDoubleTy());
+    } else if (stdType.isa<IntegerType>()) {
+      return success(llvmType.isIntegerTy());
     }
-    if (auto vectorType = type.dyn_cast<VectorType>()) {
-      if (vectorType.getShape().size() > 1)
-        return op.emitOpError("only 1-d vector is allowed");
-      type = vectorType.getElementType();
-    }
-    if (type.isSignlessIntOrFloat())
-      return success();
-    // Note that memrefs are not supported. We currently don't have a use case
-    // for it, but even if we do, there are challenges:
-    // * if we allow memrefs to cast from/to memref descriptors, then the
-    // semantics of the cast op depends on the implementation detail of the
-    // descriptor.
-    // * if we allow memrefs to cast from/to bare pointers, some users might
-    // alternatively want metadata that only present in the descriptor.
-    //
-    // TODO: re-evaluate the memref cast design when it's needed.
-    return op.emitOpError("type must be non-index integer types, float types, "
-                          "or vector of mentioned types.");
+    return failure();
   };
-  return failure(failed(verifyMLIRCastType(op.in().getType())) ||
-                 failed(verifyMLIRCastType(op.getType())));
+
+  // Check valid casts in form of allow-list
+  if (succeeded(verifyScalarCastTypes(llvmType, otherType))) {
+    return success();
+  } else if (auto vectorType = otherType.dyn_cast<VectorType>()) {
+    if (vectorType.getShape().size() > 1)
+      return op.emitOpError("only 1-d vector is allowed");
+    if (!llvmType.isVectorTy())
+      return op.emitOpError("incorrect cast between vector and "
+                            "non-vector types");
+
+    auto llvmElementType = llvmType.getVectorElementType();
+    auto vectorElementType = vectorType.getElementType();
+
+    if (failed(verifyScalarCastTypes(llvmElementType, vectorElementType)))
+      return op.emitOpError("vector elements must have matching "
+                            "non-index integer types or float types");
+
+    return success();
+  } else if (auto memRefType = otherType.dyn_cast<MemRefType>()) {
+    auto memRefElementType = memRefType.getElementType();
+
+    if (llvmType.isStructTy()) {
+      if (llvmType.getStructNumElements() != 5)
+        return op.emitOpError("memref convertible struct must have 5 elements");
+
+      auto allocatedPtrType = llvmType.getStructElementType(0);
+      auto alignedPtrType = llvmType.getStructElementType(1);
+
+      if (!allocatedPtrType.isPointerTy())
+        return op.emitOpError(
+            "first element of memref descriptor must have pointer type");
+      if (!alignedPtrType.isPointerTy())
+        return op.emitOpError(
+            "second element of memref descriptor must have pointer type");
+
+      auto allocatedElementType = allocatedPtrType.getPointerElementTy();
+      auto alignedElementType = alignedPtrType.getPointerElementTy();
+
+      if (failed(
+              verifyScalarCastTypes(allocatedElementType, memRefElementType)))
+        return op.emitOpError(
+            "first element of memref descriptor must be a pointer to type "
+            "convertible to memref's element type");
+      if (failed(verifyScalarCastTypes(alignedElementType, memRefElementType)))
+        return op.emitOpError(
+            "second element of memref descriptor must be a pointer to type "
+            "convertible to memref's element type");
+
+      // For now skip checking other fields of memref descriptor as they rely on
+      // index lowering
+    } else {
+      return op.emitOpError(
+          "memref can be cast only from/to memref decriptor struct type");
+    }
+
+    return success();
+  }
+
+  return op.emitOpError(
+      "casted types must be non-index integer types, float types, "
+      "vector of mentioned types, or memref of mentioned types");
 }
 
 // Parses one of the keywords provided in the list `keywords` and returns the
